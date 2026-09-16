@@ -297,13 +297,13 @@ async function rpc(fn, ...args) {
     });
     const opt = fn === 'dDriverPdf' ? { method: 'POST', body: String(args[1] || ''), headers: { 'Content-Type': 'text/plain;charset=utf-8' } } : {};
     let res, lastErr;
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < 4; attempt++) {
       try {
         res = await fetch(`${API_URL}?${q.toString()}`, opt);
         if (res.ok) { lastErr = null; break; }
         lastErr = new Error(`שגיאת שרת (${res.status})`);
       } catch (err) { lastErr = new Error('אין חיבור לאינטרנט'); }
-      await new Promise((r) => setTimeout(r, 900 * (attempt + 1)));
+      await new Promise((r) => setTimeout(r, 600 * (attempt + 1)));
     }
     if (lastErr) throw lastErr;
     const j = await res.json();
@@ -588,11 +588,31 @@ const openNotes = new Set();
 const openRecip = new Set();
 let sheetMode = false;
 
+const SKEY = 'drv_state';
+function applyQueue() {
+  if (!S || !OFFLINE_OK) return;
+  qGet().forEach((it) => {
+    const st = S.stops.find((x) => x.id === it.id);
+    if (!st) return;
+    st.delivered_at = it.delivered ? (st.delivered_at || new Date(it.at).toISOString()) : '';
+    st.pending = true;
+  });
+}
+
 async function load(quiet) {
+  if (!S && OFFLINE_OK) {                       // מציגים מיד את מה שנשמר במכשיר, ומתעדכנים ברקע
+    try {
+      const cached = JSON.parse(localStorage.getItem(SKEY) || 'null');
+      if (cached && cached.stops) { S = cached; applyQueue(); render(); }
+    } catch (e) { /* אין מטמון */ }
+  }
   try {
     S = await rpc('dDriverGetState', BOOT.token);
+    if (OFFLINE_OK) { try { localStorage.setItem(SKEY, JSON.stringify(S)); } catch (e) { /* אין מקום */ } }
+    applyQueue();
     render();
   } catch (e) {
+    if (S) return;                              // יש נתונים על המסך – לא מחליפים אותם בשגיאה
     if (!quiet || !S) $('#app').innerHTML = `<div class="card fullpage"><div style="font-size:44px">⚠️</div><h2>${e.message === 'INVALID_LINK' ? 'הקישור לא תקין' : 'שגיאה בטעינה'}</h2>
       <p class="muted">${e.message === 'INVALID_LINK' ? 'ייתכן שנוצר קישור חדש. יש לבקש מהמשרד את הקישור העדכני.' : esc(e.message)}</p>
       <button class="btn btn-primary" onclick="location.reload()">ניסיון נוסף</button></div>`;
@@ -626,6 +646,7 @@ function render() {
       <h1>🚗 ${esc(S.truck.driver_name || S.truck.name)}</h1>
       <div class="sub">${esc(S.event.name)}${S.truck.driver_name && S.truck.name ? ' · ' + esc(S.truck.name) : ''}</div>
       ${S.truck.notes ? `<div class="alert info" style="margin-top:10px"><span class="a-icon">📌</span><div>${esc(S.truck.notes)}</div></div>` : ''}
+      ${qGet().length ? `<div class="alert warn" style="margin-top:10px"><span class="a-icon">📶</span><div>${qGet().length} סימונים ממתינים לסנכרון. יישלחו לבד כשתהיה קליטה.</div></div>` : ''}
       <div class="d-prog"><div class="progress good"><div style="width:${pct}%"></div></div><b class="num">${done.length}/${all.length}</b></div>
       <div class="sub" style="margin-top:4px">נמסרו ${fmtNum(pkDone)} מתוך ${fmtNum(pk)} חבילות${next ? '' : all.length ? ' · <b style="color:var(--good-ink)">✓ סיימת את כל העצירות!</b>' : ''}</div>
       <button class="btn btn-ghost" id="sheetBtn" style="width:100%;justify-content:center;margin-top:12px">📄 דף נהג – צפייה, הדפסה והורדה</button>
@@ -751,7 +772,7 @@ function stopCard(s, n, isNext) {
     ${s.notes ? `<div class="notes ${longNotes && !openNotes.has(s.id) ? 'collapsed' : ''}">${esc(s.notes)}</div>${longNotes ? `<button class="more" data-more="${s.id}">${openNotes.has(s.id) ? 'פחות ▲' : 'עוד ▼'}</button>` : ''}` : ''}
     ${(s.recipients || []).length ? `<button class="more" data-recip="${s.id}">👥 רשימת מקבלים בתחנה (${s.recipients.length}) ${openRecip.has(s.id) ? '▲' : '▼'}</button>
       ${openRecip.has(s.id) ? `<div class="recips">${s.recipients.map((r, i) => `<div class="rc"><span class="rn">${i + 1}</span><span><b>${esc(r.last)}</b> ${esc(r.first)}</span>${r.phone ? `<a href="tel:${esc(r.phone)}" class="num" dir="ltr">${esc(r.phone)}</a>` : '<span></span>'}<span class="rp">${esc(r.packages || '')}</span></div>`).join('')}</div>` : ''}` : ''}
-    ${s.delivered_at ? `<div class="done-row"><span>✓ נמסר ב-${fmtDateTime(s.delivered_at).split(' ')[1] || ''}</span><button class="btn btn-ghost btn-sm" data-undo="${s.id}">ביטול</button></div>` : `
+    ${s.delivered_at ? `<div class="done-row"><span>✓ נמסר ב-${fmtDateTime(s.delivered_at).split(' ')[1] || ''}${s.pending ? ' · ממתין לסנכרון' : ''}</span><button class="btn btn-ghost btn-sm" data-undo="${s.id}">ביטול</button></div>` : `
     <div class="acts">
       ${s.address || s.area ? `<a class="btn btn-ghost" href="${wazeUrl(s)}" target="_top">🧭 Waze</a>` : '<span></span>'}
       ${s.phone ? `<a class="btn btn-ghost" href="tel:${esc(s.phone)}">📞 חיוג</a>` : '<span></span>'}
@@ -759,6 +780,39 @@ function stopCard(s, n, isNext) {
     </div>`}
   </div>`;
 }
+
+// ---------------------------------------------------------------- עבודה גם בלי קליטה (רק בגרסת האתר)
+const OFFLINE_OK = typeof API_URL !== 'undefined';
+const QKEY = 'drv_queue';
+const qGet = () => { try { return JSON.parse(localStorage.getItem(QKEY) || '[]'); } catch (e) { return []; } };
+const qSet = (a) => { try { localStorage.setItem(QKEY, JSON.stringify(a)); } catch (e) { /* אין מקום */ } };
+const isOffline = (e) => !navigator.onLine || /חיבור|Failed|NetworkError|Load failed/i.test(String((e && e.message) || e));
+
+function queueMark(id, delivered) {
+  const q = qGet().filter((x) => x.id !== id);
+  q.push({ id, delivered, at: Date.now() });
+  qSet(q);
+  const s = S && S.stops.find((x) => x.id === id);
+  if (s) { s.delivered_at = delivered ? new Date().toISOString() : ''; s.pending = true; }
+}
+
+let flushing = false;
+async function flushQueue(quiet) {
+  if (!OFFLINE_OK || flushing || !qGet().length || !navigator.onLine) return;
+  flushing = true;
+  try {
+    for (const item of qGet().slice()) {
+      try {
+        S = await rpc('dDriverMark', BOOT.token, item.id, item.delivered);
+        qSet(qGet().filter((x) => x.id !== item.id));
+      } catch (e) { return; }
+    }
+    render();
+    if (!quiet) toast('הכול סונכרן עם המשרד ✓', { type: 'good', timeout: 2500 });
+  } finally { flushing = false; }
+}
+window.addEventListener('online', () => flushQueue());
+setInterval(() => flushQueue(true), 30000);
 
 async function mark(id, delivered) {
   const s = S.stops.find((x) => x.id === id);
@@ -771,6 +825,11 @@ async function mark(id, delivered) {
     render();
     if (delivered) toast(`✓ נמסר: ${esc(s.address || s.contact || '')}`, { type: 'good', timeout: 2500 });
   } catch (e) {
+    if (OFFLINE_OK && isOffline(e)) {
+      queueMark(id, delivered); render();
+      toast('אין קליטה – נשמר במכשיר ויסונכרן אוטומטית', { type: 'warn', timeout: 4000 });
+      return;
+    }
     s.delivered_at = prev; render();
     toast(`לא נשמר – ${esc(e.message)}. בדקו חיבור ונסו שוב.`, { type: 'error', timeout: 7000 });
   }
@@ -804,7 +863,10 @@ function startLocation() {
   } catch (e) { /* לא נתמך */ }
 }
 
-load().then(startLocation);
+if (OFFLINE_OK && 'serviceWorker' in navigator && location.protocol === 'https:') {
+  navigator.serviceWorker.register('sw.js').catch(() => { /* לא קריטי */ });
+}
+load().then(startLocation).then(() => flushQueue(true));
 setInterval(() => { if (!document.hidden && !sheetMode && !$('.modal-back')) load(true); }, 60000);
 document.addEventListener('visibilitychange', () => { if (!document.hidden && !sheetMode) load(true); });
 </script>
