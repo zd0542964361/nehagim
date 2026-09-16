@@ -602,7 +602,23 @@ function applyQueue() {
   });
 }
 
+let slowTimers = [];
+function loadingNote(txt) {
+  const el = $('#app .loading div:last-child');
+  if (el) el.textContent = txt;
+}
+function startSlowHints() {
+  stopSlowHints();
+  slowTimers = [
+    setTimeout(() => loadingNote('מתחבר לשרת…'), 4000),
+    setTimeout(() => loadingNote('החיבור איטי כרגע, ממשיכים לנסות…'), 12000),
+    setTimeout(() => loadingNote('עדיין מנסים. אם זה נתקע, סגרו ופתחו שוב את הדף.'), 25000),
+  ];
+}
+function stopSlowHints() { slowTimers.forEach(clearTimeout); slowTimers = []; }
+
 async function load(quiet) {
+  if (!S) startSlowHints();
   if (!S && OFFLINE_OK) {                       // מציגים מיד את מה שנשמר במכשיר, ומתעדכנים ברקע
     try {
       const cached = JSON.parse(localStorage.getItem(SKEY) || 'null');
@@ -611,10 +627,12 @@ async function load(quiet) {
   }
   try {
     S = await rpc('dDriverGetState', BOOT.token);
+    stopSlowHints();
     if (OFFLINE_OK) { try { localStorage.setItem(SKEY, JSON.stringify(S)); } catch (e) { /* אין מקום */ } }
     applyQueue();
     render();
   } catch (e) {
+    stopSlowHints();
     if (S) return;                              // יש נתונים על המסך – לא מחליפים אותם בשגיאה
     if (!quiet || !S) $('#app').innerHTML = `<div class="card fullpage"><div style="font-size:44px">⚠️</div><h2>${e.message === 'INVALID_LINK' ? 'הקישור לא תקין' : 'שגיאה בטעינה'}</h2>
       <p class="muted">${e.message === 'INVALID_LINK' ? 'ייתכן שנוצר קישור חדש. יש לבקש מהמשרד את הקישור העדכני.' : esc(e.message)}</p>
