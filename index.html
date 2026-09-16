@@ -281,7 +281,8 @@ function setBusy(delta) {
 const API_URL = 'https://script.google.com/macros/s/AKfycbz52ne9nK_DCyVD4lrg11n5t1rpmMmAe3qRopGQIw4grATfwTqErNWQETAEVsTiP6dWyQ/exec';
 const API_ACT = {
   dDriverGetState: ['state', 't'],
-  dDriverMark: ['mark', 't', 'stop', 'v'],
+  dDriverMark: ['mark', 't', 'stop', 'v', 'lat', 'lng'],
+  dDriverDepart: ['depart', 't', 'stop', 'lat', 'lng'],
   dDriverLocation: ['loc', 't', 'lat', 'lng'],
   dDriverPdf: ['pdf', 't', 'html'],
 };
@@ -296,19 +297,21 @@ async function rpc(fn, ...args) {
       q.set(k, args[i] === true ? '1' : args[i] === false ? '0' : String(args[i]));
     });
     const opt = fn === 'dDriverPdf' ? { method: 'POST', body: String(args[1] || ''), headers: { 'Content-Type': 'text/plain;charset=utf-8' } } : {};
-    let res, lastErr;
+    let res, data, lastErr;
     for (let attempt = 0; attempt < 4; attempt++) {
       try {
         res = await fetch(`${API_URL}?${q.toString()}`, opt);
-        if (res.ok) { lastErr = null; break; }
-        lastErr = new Error(`שגיאת שרת (${res.status})`);
+        if (res.ok) {
+          const txt = await res.text();
+          if (txt.charAt(0) === '{') { data = JSON.parse(txt); lastErr = null; break; }
+          lastErr = new Error('השרת החזיר תשובה לא צפויה');   // גוגל מחזיר לפעמים דף HTML – מנסים שוב
+        } else lastErr = new Error(`שגיאת שרת (${res.status})`);
       } catch (err) { lastErr = new Error('אין חיבור לאינטרנט'); }
       await new Promise((r) => setTimeout(r, 600 * (attempt + 1)));
     }
     if (lastErr) throw lastErr;
-    const j = await res.json();
-    if (!j.ok) throw new Error(j.error || 'שגיאה');
-    return j.data;
+    if (!data.ok) throw new Error(data.error || 'שגיאה');
+    return data.data;
   } finally { setBusy(-1); }
 }
 
@@ -767,6 +770,7 @@ function stopCard(s, n, isNext) {
       <div><div class="addr">${esc(s.address) || '<span class="muted">אין כתובת – להתקשר</span>'}</div><div class="area">${esc([s.area, s.station && s.station !== s.area ? 'תחנה: ' + s.station : ''].filter(Boolean).join(' · '))}</div></div>
       <div class="pk num">${esc(s.packages || 0)}<small>חבילות</small></div>
     </div>
+    ${s.departed_at && !s.delivered_at ? `<div class="contact" style="color:var(--primary-strong)">🚗 יצאת ב-${fmtDateTime(s.departed_at).split(' ')[1] || ''}${s.eta_at ? ` · הגעה משוערת ${fmtDateTime(s.eta_at).split(' ')[1] || ''}` : ''}</div>` : ''}
     ${s.contact || s.phone ? `<div class="contact">👤 <b>${esc(s.contact)}</b> ${s.phone ? `<span class="num" dir="ltr">${esc(s.phone)}</span>` : ''}${s.phone2 ? ` · <span class="num" dir="ltr">${esc(s.phone2)}</span>` : ''}</div>` : ''}
     ${items.length ? `<div class="items">${items.map(([k, v]) => `<span class="item">${esc(k)} <b class="num">${fmtNum(v)}</b></span>`).join('')}</div>` : ''}
     ${s.notes ? `<div class="notes ${longNotes && !openNotes.has(s.id) ? 'collapsed' : ''}">${esc(s.notes)}</div>${longNotes ? `<button class="more" data-more="${s.id}">${openNotes.has(s.id) ? 'פחות ▲' : 'עוד ▼'}</button>` : ''}` : ''}
@@ -774,7 +778,7 @@ function stopCard(s, n, isNext) {
       ${openRecip.has(s.id) ? `<div class="recips">${s.recipients.map((r, i) => `<div class="rc"><span class="rn">${i + 1}</span><span><b>${esc(r.last)}</b> ${esc(r.first)}</span>${r.phone ? `<a href="tel:${esc(r.phone)}" class="num" dir="ltr">${esc(r.phone)}</a>` : '<span></span>'}<span class="rp">${esc(r.packages || '')}</span></div>`).join('')}</div>` : ''}` : ''}
     ${s.delivered_at ? `<div class="done-row"><span>✓ נמסר ב-${fmtDateTime(s.delivered_at).split(' ')[1] || ''}${s.pending ? ' · ממתין לסנכרון' : ''}</span><button class="btn btn-ghost btn-sm" data-undo="${s.id}">ביטול</button></div>` : `
     <div class="acts">
-      ${s.address || s.area ? `<a class="btn btn-ghost" href="${wazeUrl(s)}" target="_top">🧭 Waze</a>` : '<span></span>'}
+      ${s.address || s.area ? `<a class="btn btn-ghost" href="${wazeUrl(s)}" target="_top" data-nav="${s.id}">🧭 Waze</a>` : '<span></span>'}
       ${s.phone ? `<a class="btn btn-ghost" href="tel:${esc(s.phone)}">📞 חיוג</a>` : '<span></span>'}
       <button class="btn btn-deliver" data-give="${s.id}">✓ נמסר</button>
     </div>`}
@@ -821,7 +825,9 @@ async function mark(id, delivered) {
   s.delivered_at = delivered ? new Date().toISOString() : '';
   render();
   try {
-    S = await rpc('dDriverMark', BOOT.token, id, delivered);
+    const p = delivered ? await quickPos(1500) : null;
+    const c = p && p.coords;
+    S = await rpc('dDriverMark', BOOT.token, id, delivered, c ? c.latitude : '', c ? c.longitude : '');
     render();
     if (delivered) toast(`✓ נמסר: ${esc(s.address || s.contact || '')}`, { type: 'good', timeout: 2500 });
   } catch (e) {
@@ -835,7 +841,28 @@ async function mark(id, delivered) {
   }
 }
 
+/** מיקום נוכחי מהיר (אם אין – ממשיכים בלי) */
+function quickPos(ms) {
+  if (lastPos && Date.now() - lastPos.timestamp < 120000) return Promise.resolve(lastPos);
+  if (!navigator.geolocation) return Promise.resolve(null);
+  return new Promise((ok) => {
+    let done = false;
+    const finish = (p) => { if (!done) { done = true; ok(p); } };
+    setTimeout(() => finish(lastPos), ms || 2500);
+    navigator.geolocation.getCurrentPosition((p) => { lastPos = p; finish(p); }, () => finish(lastPos), { maximumAge: 120000, timeout: ms || 2500 });
+  });
+}
+
+/** הנהג יצא לנקודה – נרשם במשרד עם שעה וזמן הגעה משוער */
+async function reportDepart(id) {
+  const p = await quickPos(1200);
+  const c = p && p.coords;
+  try { S = await rpc('dDriverDepart', BOOT.token, id, c ? c.latitude : '', c ? c.longitude : ''); render(); } catch (e) { /* לא קריטי */ }
+}
+
 document.addEventListener('click', async (e) => {
+  const nav = e.target.closest('[data-nav]');
+  if (nav) reportDepart(nav.dataset.nav);   // לא מעכב את פתיחת ווייז
   const g = e.target.closest('[data-give]');
   if (g) { g.disabled = true; return mark(g.dataset.give, true); }
   const u = e.target.closest('[data-undo]');
@@ -849,11 +876,13 @@ document.addEventListener('click', async (e) => {
 // ---------------------------------------------------------------- מיקום (רק כשהדף פתוח ובאישור הנהג)
 let locState = '';
 let lastSent = 0;
+let lastPos = null;
 function updateLocInfo() { const el = $('#locInfo'); if (el) el.textContent = locState; }
 function startLocation() {
   if (!navigator.geolocation) return;
   try {
     navigator.geolocation.watchPosition((pos) => {
+      lastPos = pos;
       locState = '📍 המיקום משותף עם המשרד כשהדף פתוח';
       updateLocInfo();
       if (Date.now() - lastSent < 90 * 1000) return;
